@@ -1,0 +1,14 @@
+# Нормализуем переводы строк независимо от настроек Git на машине.
+* text=auto eol=lf
+
+# Файлы, которые исполняются внутри Linux-контейнера. CRLF здесь ломает
+# шебанг и даёт "exec: no such file or directory".
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Бинарные файлы Git трогать не должен.
+*.png binary
+*.jpg binary
+*.ico binary
