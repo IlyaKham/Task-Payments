@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.enums import TERMINAL_STATUSES, OperationStatus
 from app.domain.errors import OperationNotFound
 from app.domain.models import Operation
+from app.repositories._sql import execute_rowcount
 
 
 async def create(
@@ -83,15 +84,16 @@ async def try_begin_processing(session: AsyncSession, operation_id: str) -> bool
     Возвращает True единственному вызову, выигравшему гонку; все остальные
     конкурентные submit получают False и просто отдают текущее состояние.
     """
-    result = await session.execute(
+    affected = await execute_rowcount(
+        session,
         update(Operation)
         .where(
             Operation.operation_id == operation_id,
             Operation.status == OperationStatus.CREATED,
         )
-        .values(status=OperationStatus.PROCESSING)
+        .values(status=OperationStatus.PROCESSING),
     )
-    return result.rowcount == 1
+    return affected == 1
 
 
 async def link_provider_payment(
@@ -103,15 +105,16 @@ async def link_provider_payment(
     вытаскивать операцию из COMPLETED или REJECTED. Возвращает False, если
     связь уже была установлена (например, ранней квитанцией).
     """
-    result = await session.execute(
+    affected = await execute_rowcount(
+        session,
         update(Operation)
         .where(
             Operation.operation_id == operation_id,
             Operation.provider_payment_id.is_(None),
         )
-        .values(provider_payment_id=provider_payment_id)
+        .values(provider_payment_id=provider_payment_id),
     )
-    return result.rowcount == 1
+    return affected == 1
 
 
 async def try_finalize(
@@ -126,20 +129,13 @@ async def try_finalize(
     if to_status not in TERMINAL_STATUSES:
         raise ValueError(f"{to_status} не является финальным статусом")
 
-    result = await session.execute(
+    affected = await execute_rowcount(
+        session,
         update(Operation)
         .where(
             Operation.operation_id == operation_id,
             Operation.status == OperationStatus.PROCESSING,
         )
-        .values(status=to_status)
+        .values(status=to_status),
     )
-    return result.rowcount == 1
-
-
-async def list_unfinished(session: AsyncSession) -> list[Operation]:
-    """Операции, всё ещё ожидающие квитанцию. Нужны для восстановления."""
-    result = await session.execute(
-        select(Operation).where(Operation.status == OperationStatus.PROCESSING)
-    )
-    return list(result.scalars().all())
+    return affected == 1

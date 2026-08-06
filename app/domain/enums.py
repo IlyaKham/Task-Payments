@@ -37,21 +37,22 @@ class IntentState(StrEnum):
 class EventType(StrEnum):
     """Записи истории переходов.
 
-    События без смены статуса (``*_IGNORED``, ``PROVIDER_*``) пишутся ради
-    прослеживаемости, но операцию не двигают. Так сохраняется инвариант:
-    финальный статус определяет только квитанция.
+    Список намеренно короткий. Повторный submit и повторная квитанция не
+    пишут ничего: они не меняют состояние, а десяток одинаковых записей от
+    конкурентных запросов только замусорит историю.
+
+    События без смены статуса (``PROVIDER_*``, ``RECOVERY_RESUMED``,
+    ``RECEIPT_CONFLICT_IGNORED``) фиксируют факты, но операцию не двигают.
+    Так сохраняется инвариант: финальный статус определяет только квитанция.
     """
 
     CREATED = "CREATED"
     SUBMIT_REQUESTED = "SUBMIT_REQUESTED"
-    SUBMIT_DUPLICATE = "SUBMIT_DUPLICATE"
-    PROVIDER_ATTEMPT_STARTED = "PROVIDER_ATTEMPT_STARTED"
     PROVIDER_ATTEMPT_FAILED = "PROVIDER_ATTEMPT_FAILED"
     PROVIDER_ACCEPTED = "PROVIDER_ACCEPTED"
     RECOVERY_RESUMED = "RECOVERY_RESUMED"
     COMPLETED = "COMPLETED"
     REJECTED = "REJECTED"
-    RECEIPT_DUPLICATE_IGNORED = "RECEIPT_DUPLICATE_IGNORED"
     RECEIPT_CONFLICT_IGNORED = "RECEIPT_CONFLICT_IGNORED"
 
 

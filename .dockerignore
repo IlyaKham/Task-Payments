@@ -1,0 +1,34 @@
+# Контекст сборки должен быть маленьким: .venv весит сотни мегабайт и
+# всё равно несовместим с Linux-образом.
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Локальные настройки не должны попасть в образ и перекрыть переменные
+# окружения из compose.
+.env
+.env.local
+
+tests/
+scripts/
+README.md
+compose.yaml
+docker-compose.yml

@@ -1,4 +1,4 @@
-"""Начальная схема: operations, submit_intents, events, receipts
+"""Начальная схема: operations, event_outbox, events, receipts
 
 Revision ID: 0001
 Revises:
@@ -54,7 +54,7 @@ def upgrade() -> None:
     op.create_index("ix_operations_status", "operations", ["status"])
 
     op.create_table(
-        "submit_intents",
+        "event_outbox",
         sa.Column("operation_id", sa.String(length=128), nullable=False),
         sa.Column("idempotency_key", sa.String(length=128), nullable=False),
         sa.Column("request_body", sa.Text(), nullable=False),
@@ -83,15 +83,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["operation_id"],
             ["operations.operation_id"],
-            name="fk_submit_intents_operation_id_operations",
+            name="fk_event_outbox_operation_id_operations",
             ondelete="CASCADE",
         ),
-        sa.PrimaryKeyConstraint("operation_id", name="pk_submit_intents"),
+        sa.PrimaryKeyConstraint("operation_id", name="pk_event_outbox"),
     )
     # Обслуживает опрос диспетчера: «дай работу, которой пора, подешевле».
-    op.create_index(
-        "ix_submit_intents_due", "submit_intents", ["state", "next_attempt_at"]
-    )
+    op.create_index("ix_event_outbox_due", "event_outbox", ["state", "next_attempt_at"])
 
     op.create_table(
         "events",
@@ -156,7 +154,7 @@ def downgrade() -> None:
     op.drop_index("ix_receipts_operation_id", table_name="receipts")
     op.drop_table("receipts")
     op.drop_table("events")
-    op.drop_index("ix_submit_intents_due", table_name="submit_intents")
-    op.drop_table("submit_intents")
+    op.drop_index("ix_event_outbox_due", table_name="event_outbox")
+    op.drop_table("event_outbox")
     op.drop_index("ix_operations_status", table_name="operations")
     op.drop_table("operations")

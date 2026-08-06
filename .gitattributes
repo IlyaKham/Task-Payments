@@ -8,6 +8,11 @@ Dockerfile text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 
+# Windows PowerShell 5.1 читает .ps1 как cp1251, если у файла нет BOM, и
+# кириллица превращается в мусор. BOM в файле оставлен намеренно, здесь
+# фиксируем родные для Windows переводы строк.
+*.ps1 text eol=crlf
+
 # Бинарные файлы Git трогать не должен.
 *.png binary
 *.jpg binary

@@ -1,4 +1,4 @@
-"""Намерения отправки — транзакционный outbox.
+"""Намерения отправки — транзакционный outbox (таблица ``event_outbox``).
 
 Захват использует ``FOR UPDATE ... SKIP LOCKED``: несколько задач
 диспетчера (или несколько экземпляров сервиса) могут опрашивать одну
@@ -20,8 +20,9 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import IntentState
-from app.domain.models import SubmitIntent
+from app.domain.enums import IntentState, OperationStatus
+from app.domain.models import Operation, SubmitIntent
+from app.repositories._sql import execute_rowcount
 
 
 async def create(
@@ -93,6 +94,9 @@ async def claim_due(
             lease_expires_at=now + timedelta(seconds=lease_seconds),
         )
         .returning(SubmitIntent)
+        # Синхронизировать сессию нечем и незачем: захваченные строки
+        # тут же уезжают в обычные значения, а сессия закрывается.
+        .execution_options(synchronize_session=False)
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
@@ -118,10 +122,17 @@ async def reschedule(
 
     Сама операция остаётся в PROCESSING — транспортный сбой не является
     отказом, платёж вполне мог быть уже принят провайдером.
+
+    Условие ``state == IN_FLIGHT`` обязательно: пока шёл сетевой вызов,
+    квитанция могла прийти и перевести намерение в DONE. Без предусловия
+    неудачная попытка воскресила бы завершённую работу.
     """
     await session.execute(
         update(SubmitIntent)
-        .where(SubmitIntent.operation_id == operation_id)
+        .where(
+            SubmitIntent.operation_id == operation_id,
+            SubmitIntent.state == IntentState.IN_FLIGHT,
+        )
         .values(
             state=IntentState.PENDING,
             next_attempt_at=next_attempt_at,
@@ -136,10 +147,16 @@ async def mark_failed(session: AsyncSession, operation_id: str, error: str) -> N
 
     Статус операции всё равно не меняем: это право есть только у
     квитанции. Операция остаётся в PROCESSING и видна как незавершённая.
+
+    Предусловие по состоянию — то же, что и в ``reschedule``: пришедшая
+    во время вызова квитанция уже могла закрыть намерение.
     """
     await session.execute(
         update(SubmitIntent)
-        .where(SubmitIntent.operation_id == operation_id)
+        .where(
+            SubmitIntent.operation_id == operation_id,
+            SubmitIntent.state == IntentState.IN_FLIGHT,
+        )
         .values(state=IntentState.FAILED, lease_expires_at=None, last_error=error[:2000])
     )
 
@@ -165,10 +182,56 @@ async def revive_failed(session: AsyncSession) -> int:
 
     Перезапуск — новый шанс: провайдер мог восстановиться, а ключ
     идемпотентности гарантирует, что второго платежа не появится.
+
+    Оживляем только намерения незавершённых операций. Если исход уже
+    известен из квитанции, повторять вызов незачем.
     """
-    result = await session.execute(
-        update(SubmitIntent)
-        .where(SubmitIntent.state == IntentState.FAILED)
-        .values(state=IntentState.PENDING, attempts=0, lease_expires_at=None)
+    unfinished = (
+        select(Operation.operation_id)
+        .where(Operation.status == OperationStatus.PROCESSING)
+        .scalar_subquery()
     )
-    return result.rowcount
+    return await execute_rowcount(
+        session,
+        update(SubmitIntent)
+        .where(
+            SubmitIntent.state == IntentState.FAILED,
+            SubmitIntent.operation_id.in_(unfinished),
+        )
+        .values(state=IntentState.PENDING, attempts=0, lease_expires_at=None),
+    )
+
+
+async def release_all_in_flight(session: AsyncSession) -> int:
+    """При старте отпускает намерения, брошенные предыдущим процессом.
+
+    Аренда павшего процесса истечёт сама, но ждать её нечестно по времени:
+    перезапуск во время обработки — штатный сценарий, и отправка должна
+    продолжиться сразу. Здесь используется допущение, что экземпляр сервиса
+    один (как в compose задания). Даже если оно нарушится, второго платежа
+    не будет: повтор уходит с тем же ключом идемпотентности.
+    """
+    return await execute_rowcount(
+        session,
+        update(SubmitIntent)
+        .where(SubmitIntent.state == IntentState.IN_FLIGHT)
+        .values(state=IntentState.PENDING, lease_expires_at=None),
+    )
+
+
+async def list_resumable(session: AsyncSession) -> list[SubmitIntent]:
+    """Намерения, отправка которых будет продолжена после запуска."""
+    unfinished = (
+        select(Operation.operation_id)
+        .where(Operation.status == OperationStatus.PROCESSING)
+        .scalar_subquery()
+    )
+    result = await session.execute(
+        select(SubmitIntent)
+        .where(
+            SubmitIntent.state == IntentState.PENDING,
+            SubmitIntent.operation_id.in_(unfinished),
+        )
+        .order_by(SubmitIntent.created_at)
+    )
+    return list(result.scalars().all())

@@ -2,6 +2,7 @@
 .venv/
 venv/
 env/
+.direnv/
 
 # Python
 __pycache__/
@@ -12,22 +13,43 @@ build/
 dist/
 *.egg-info/
 .eggs/
+pip-wheel-metadata/
 
 # Кэши инструментов
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.dmypy.json
+dmypy.json
+.tox/
+.nox/
+.hypothesis/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
-# IDE
+# IDE и редакторы
 .idea/
 .vscode/
+.vs/
+*.swp
+*.swo
+*~
 
-# Переменные окружения
-.env
-.env.local
+# Переменные окружения. Секреты не должны утечь ни в одном варианте
+# файла, поэтому под правило попадают все .env*, а пример возвращается
+# исключением — он обязан быть в репозитории.
+.env*
+!.env.example
+
+# Журналы и локальные дампы
+*.log
+*.sql.gz
+*.dump
 
 # ОС
 Thumbs.db
+ehthumbs.db
+desktop.ini
 .DS_Store

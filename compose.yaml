@@ -1,0 +1,51 @@
+# Три сервиса вместо двух из примера ТЗ: постоянное хранилище здесь —
+# PostgreSQL, поэтому том candidate-data отдан ему. Требование «данные
+# переживают удаление и повторное создание контейнера без удаления
+# volume» при этом выполняется в том же виде.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    volumes:
+      - candidate-data:/var/lib/postgresql/data
+    healthcheck:
+      # Без этой проверки candidate-service стартует раньше базы и тратит
+      # попытки миграции впустую.
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  candidate-service:
+    build: .
+    environment:
+      PROVIDER_URL: http://provider-simulator:8081
+      DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
+      LOG_LEVEL: INFO
+      LOG_JSON: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Диспетчеру нужно время на корректное завершение
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  provider-simulator:
+    image: ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0
+    environment:
+      CALLBACK_URL: http://candidate-service:8080/receipts
+    ports:
+      - "8081:8081"
+    depends_on:
+      - candidate-service
+    restart: unless-stopped
+
+volumes:
+  candidate-data:

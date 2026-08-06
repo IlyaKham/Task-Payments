@@ -1,0 +1,228 @@
+# Task Payments
+
+Сервис проводит платёжную операцию через внешнего провайдера и сохраняет
+корректное состояние при повторах, конкурентных запросах, потерянных
+HTTP-ответах и перезапусках.
+
+Главный инвариант: **одной операции соответствует не более одного платежа
+провайдера, а финальный статус определяется только callback-квитанцией.**
+
+## Запуск
+
+```bash
+docker compose up --build
+```
+
+Поднимаются три сервиса: `candidate-service` (порт 8080), `provider-simulator`
+(порт 8081) и `postgres` с томом `candidate-data`. Схема приводится к
+актуальной автоматически — `alembic upgrade head` выполняется в entrypoint до
+старта приложения.
+
+Готовность:
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+Остановка с сохранением данных:
+
+```bash
+docker compose down
+```
+
+Полная очистка вместе с базой:
+
+```bash
+docker compose down -v
+```
+
+## Сквозной сценарий
+
+Ниже полный путь операции до `COMPLETED`. Симулятор сам присылает квитанцию
+на `/receipts`, поэтому вручную её слать не нужно.
+
+**1. Создание операции — ожидается `201`**
+
+```bash
+curl -s -i -X POST http://localhost:8080/operations -H 'Content-Type: application/json' -d '{"operationId":"operation-123","amount":"1000.00","currency":"RUB","description":"Оплата заказа"}'
+```
+
+**2. Повторное создание — ожидается `409`**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/operations -H 'Content-Type: application/json' -d '{"operationId":"operation-123","amount":"1000.00","currency":"RUB","description":"Оплата заказа"}'
+```
+
+**3. Первый submit — ожидается `202`**
+
+```bash
+curl -s -i -X POST http://localhost:8080/operations/operation-123/submit
+```
+
+**4. Повторный submit — ожидается `200` и текущее состояние**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/operations/operation-123/submit
+```
+
+**5. Состояние — `PROCESSING`, затем `COMPLETED` после квитанции**
+
+```bash
+curl -s http://localhost:8080/operations/operation-123
+```
+
+**6. История переходов**
+
+```bash
+curl -s http://localhost:8080/operations/operation-123/events
+```
+
+Ожидаемая история: `CREATED` → `SUBMIT_REQUESTED` → `PROVIDER_ACCEPTED` →
+`COMPLETED`. Порядок двух последних событий зависит от того, обогнала ли
+квитанция ответ провайдера, — оба варианта корректны.
+
+
+### Проверка устойчивости
+
+**Конкурентные submit — ровно одно намерение**
+
+```bash
+curl -s -X POST http://localhost:8080/operations -H 'Content-Type: application/json' -d '{"operationId":"operation-race","amount":"500.00","currency":"RUB"}' && seq 20 | xargs -P 20 -I{} curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/operations/operation-race/submit | sort | uniq -c
+```
+
+Ровно один ответ `202`, остальные — `200`. В истории один `SUBMIT_REQUESTED`.
+
+**Перезапуск во время обработки**
+
+```bash
+docker compose restart candidate-service
+```
+
+После старта сервис сам находит незавершённые операции и продолжает отправку
+с прежним `Idempotency-Key`. В журнале это видно как `recovery.completed`, а в
+истории операции — событие `RECOVERY_RESUMED`.
+
+**Сохранность данных при пересоздании контейнера**
+
+```bash
+docker compose down && docker compose up -d && curl -s http://localhost:8080/operations/operation-123
+```
+
+Том не удаляется, операция и её история остаются на месте.
+
+## API
+
+| Метод | Маршрут | Ответ | Назначение |
+|---|---|---|---|
+| `GET` | `/health` | `200` | Готовность сервиса и базы |
+| `POST` | `/operations` | `201` / `409` | Создание операции |
+| `POST` | `/operations/{id}/submit` | `202` / `200` | Надёжно запланировать отправку |
+| `POST` | `/receipts` | `204` / `404` / `409` | Приём callback-квитанции |
+| `GET` | `/operations/{id}` | `200` / `404` | Текущее состояние |
+| `GET` | `/operations/{id}/events` | `200` / `404` | История переходов |
+
+`202` на `submit` получает единственный запрос, создавший намерение; все
+повторные и конкурентные получают `200` с текущим состоянием.
+
+Квитанция отвечает `204` во всех штатных случаях, включая повторную и
+запоздалую конфликтующую. `409` — только при несовпадении
+`providerPaymentId` после установления связи, `404` — при неизвестной
+операции.
+
+## Как это устроено
+
+### Transactional outbox
+
+`POST /operations/{id}/submit` **одной транзакцией** переводит операцию
+`CREATED → PROCESSING`, пишет строку в `event_outbox` и фиксирует событие.
+Сетевого вызова в этот момент не происходит.
+
+Фоновый диспетчер отдельной транзакцией забирает пачку намерений
+(`FOR UPDATE ... SKIP LOCKED`), помечает их `IN_FLIGHT` с арендой и
+**коммитит до** обращения к сети. HTTP-вызов идёт вне транзакции, результат
+пишется новой короткой транзакцией.
+
+Если процесс умрёт между вызовом и записью результата, платёж у провайдера
+может быть уже создан, но об этом никто не знает. Аренда истечёт (или
+восстановление при старте отпустит строку сразу), намерение вернётся в
+очередь, и повтор уйдёт с тем же `Idempotency-Key` и побайтово тем же телом —
+провайдер вернёт тот же `providerPaymentId`. Второго платежа не появится.
+
+### Кто имеет право менять статус
+
+Только квитанция. Ни ответ `202` провайдера, ни транспортный сбой, ни
+исчерпание попыток статус операции не двигают:
+
+* сетевая ошибка → операция остаётся `PROCESSING`, намерение уходит на повтор
+  с ограниченным backoff и jitter;
+* попытки исчерпаны → намерение переходит в `FAILED`, операция всё ещё
+  `PROCESSING` и видна как незавершённая;
+* поздний `202` после квитанции → записывается `PROVIDER_ACCEPTED`, но
+  финальный статус не откатывается.
+
+### Никаких блокировок на время HTTP
+
+Обработка квитанции берёт строку операции `FOR UPDATE`, но это короткая
+транзакция без обращений в сеть. Диспетчер на время вызова провайдера не
+держит ни одной блокировки, поэтому callback может прийти раньше ответа и
+обработаться немедленно.
+
+### Схема данных
+
+| Таблица | Назначение |
+|---|---|
+| `operations` | Текущее состояние, одна строка на `operationId` |
+| `event_outbox` | Транзакционный outbox: намерение вызвать провайдера |
+| `events` | История переходов, `event_id` монотонен внутри операции |
+| `receipts` | Все полученные квитанции: дедупликация и аудит |
+
+Дедупликация квитанций — уникальность `(operation_id, provider_payment_id,
+result)`: если `INSERT ... ON CONFLICT DO NOTHING` ничего не вставил, значит
+ровно такая квитанция уже обработана и второй переход фиксировать нельзя.
+
+## Конфигурация
+
+Все параметры читаются из переменных окружения (см. `.env.example`).
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `DATABASE_URL` | `postgresql+asyncpg://payments:payments@localhost:5432/payments` | Адрес базы |
+| `PROVIDER_URL` | `http://localhost:8081` | Базовый адрес провайдера |
+| `PROVIDER_MAX_ATTEMPTS` | `10` | Предел попыток доставки |
+| `PROVIDER_BACKOFF_BASE` | `0.5` | Базовая задержка повтора, с |
+| `PROVIDER_BACKOFF_MAX` | `15.0` | Потолок задержки, с |
+| `PROVIDER_BACKOFF_JITTER` | `0.3` | Доля случайного разброса |
+| `DISPATCHER_ENABLED` | `true` | Фоновая доставка |
+| `DISPATCHER_POLL_INTERVAL` | `1.0` | Период опроса outbox, с |
+| `DISPATCHER_BATCH_SIZE` | `16` | Размер пачки |
+| `DISPATCHER_CONCURRENCY` | `8` | Параллельных вызовов провайдера |
+| `INTENT_LEASE_SECONDS` | `60` | Аренда захваченного намерения |
+| `SHUTDOWN_GRACE_SECONDS` | `10.0` | Время на корректное завершение |
+| `LOG_LEVEL` / `LOG_JSON` | `INFO` / `true` | Журналирование |
+
+## Разработка
+
+```bash
+pip install -e ".[dev]"
+```
+
+Тесты, требующие базы, берут адрес из `TEST_DATABASE_URL` (по умолчанию
+`postgresql+asyncpg://payments:payments@localhost:5432/payments_test`) и
+пропускаются, если она недоступна.
+
+```bash
+docker run -d --name payments-test -e POSTGRES_USER=payments -e POSTGRES_PASSWORD=payments -e POSTGRES_DB=payments_test -p 5432:5432 postgres:17-alpine
+```
+
+```bash
+pytest
+```
+
+```bash
+ruff check app tests migrations && mypy app
+```
+
+Что покрыто тестами: контракт сумм и валют, классификация ответов провайдера,
+конкурентные `submit`, дедупликация и конфликты квитанций, потеря ответа после
+фактического принятия платежа, исчерпание попыток, callback раньше ответа
+провайдера, восстановление после обрыва и сверка миграций с моделями.

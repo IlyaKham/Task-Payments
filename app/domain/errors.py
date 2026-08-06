@@ -44,18 +44,6 @@ class ProviderPaymentMismatch(DomainError):
         self.received = received
 
 
-class IllegalStateTransition(DomainError):
-    code = "illegal_state_transition"
-
-    def __init__(self, operation_id: str, from_status: str, to_status: str) -> None:
-        super().__init__(
-            f"Операция '{operation_id}' не может перейти из {from_status} в {to_status}"
-        )
-        self.operation_id = operation_id
-        self.from_status = from_status
-        self.to_status = to_status
-
-
 class ProviderError(Exception):
     """Базовый класс для транспортных сбоев при обращении к провайдеру."""
 

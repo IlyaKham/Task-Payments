@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,22 +50,3 @@ async def try_record(
     insert_result = await session.execute(stmt)
     row_id = insert_result.scalar_one_or_none()
     return int(row_id) if row_id is not None else None
-
-
-async def list_for_operation(session: AsyncSession, operation_id: str) -> list[Receipt]:
-    result = await session.execute(
-        select(Receipt)
-        .where(Receipt.operation_id == operation_id)
-        .order_by(Receipt.received_at, Receipt.id)
-    )
-    return list(result.scalars().all())
-
-
-async def has_applied_receipt(session: AsyncSession, operation_id: str) -> bool:
-    """True, если исход операции уже определён какой-то квитанцией."""
-    result = await session.execute(
-        select(Receipt.id)
-        .where(Receipt.operation_id == operation_id, Receipt.applied.is_(True))
-        .limit(1)
-    )
-    return result.scalar_one_or_none() is not None

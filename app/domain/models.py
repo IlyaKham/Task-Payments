@@ -2,13 +2,13 @@
 
 Четыре таблицы, у каждой одна зона ответственности:
 
-* ``operations``     — текущее состояние, одна строка на operationId;
-* ``submit_intents`` — транзакционный outbox: надёжная запись «мы намерены
+* ``operations``   — текущее состояние, одна строка на operationId;
+* ``event_outbox`` — транзакционный outbox: надёжная запись «мы намерены
   вызвать провайдера», которая пишется в той же транзакции, что и переход
   CREATED -> PROCESSING, до любого сетевого вызова;
-* ``events``         — история переходов только на добавление, eventId
+* ``events``       — история переходов только на добавление, eventId
   монотонен *в пределах одной операции*;
-* ``receipts``       — все полученные квитанции: одновременно журнал
+* ``receipts``     — все полученные квитанции: одновременно журнал
   идемпотентности и материал для аудита.
 """
 
@@ -98,7 +98,7 @@ class SubmitIntent(Base):
     обязана дойти до провайдера, — существование этой строки, а не HTTP-вызов.
     """
 
-    __tablename__ = "submit_intents"
+    __tablename__ = "event_outbox"
 
     operation_id: Mapped[str] = mapped_column(
         String(128), ForeignKey("operations.operation_id", ondelete="CASCADE"), primary_key=True
@@ -135,7 +135,7 @@ class SubmitIntent(Base):
     operation: Mapped[Operation] = relationship(back_populates="intent", lazy="noload")
 
     __table_args__ = (
-        Index("ix_submit_intents_due", "state", "next_attempt_at"),
+        Index("ix_event_outbox_due", "state", "next_attempt_at"),
     )
 
 
