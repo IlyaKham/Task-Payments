@@ -200,27 +200,7 @@ result)`: если `INSERT ... ON CONFLICT DO NOTHING` ничего не вст�
 | `SHUTDOWN_GRACE_SECONDS` | `10.0` | Время на корректное завершение |
 | `LOG_LEVEL` / `LOG_JSON` | `INFO` / `true` | Журналирование |
 
-## Разработка
 
-```bash
-pip install -e ".[dev]"
-```
-
-Тесты, требующие базы, берут адрес из `TEST_DATABASE_URL` (по умолчанию
-`postgresql+asyncpg://payments:payments@localhost:5432/payments_test`) и
-пропускаются, если она недоступна.
-
-```bash
-docker run -d --name payments-test -e POSTGRES_USER=payments -e POSTGRES_PASSWORD=payments -e POSTGRES_DB=payments_test -p 5432:5432 postgres:17-alpine
-```
-
-```bash
-pytest
-```
-
-```bash
-ruff check app tests migrations && mypy app
-```
 
 Что покрыто тестами: контракт сумм и валют, классификация ответов провайдера,
 конкурентные `submit`, дедупликация и конфликты квитанций, потеря ответа после
